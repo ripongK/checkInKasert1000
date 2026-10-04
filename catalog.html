@@ -257,16 +257,33 @@ async function api(action, data = {}) {
 }
 
 /* ===== เริ่มต้น ===== */
-async function main() {
+async function loadCatalog() {
+  // 1) ข้อมูลล่าสุดจาก Google Sheet (ชีต Products)
   try {
-    const res = await fetch(DATA_URL, { cache: 'no-cache' });
-    S.data = await res.json();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const res = await fetch(API_URL + '?action=products', { signal: ctrl.signal });
+    clearTimeout(timer);
+    const j = await res.json();
+    if (j.ok && Array.isArray(j.products) && j.products.length) return { data: j, backup: false };
+  } catch (e) { console.warn('โหลดจากชีตไม่สำเร็จ', e); }
+  // 2) สำรอง: ไฟล์ products.json บน GitHub
+  const res = await fetch(DATA_URL, { cache: 'no-cache' });
+  return { data: await res.json(), backup: true };
+}
+
+async function main() {
+  $('list').innerHTML = '<p class="empty">กำลังโหลดราคาล่าสุด…</p>';
+  try {
+    const r = await loadCatalog();
+    S.data = r.data; S.backup = r.backup;
   } catch (e) {
-    $('list').innerHTML = '<p class="empty">โหลดข้อมูลสินค้าไม่สำเร็จ กรุณาลองใหม่</p>';
+    $('list').innerHTML = '<p class="empty">โหลดข้อมูลสินค้าไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่</p>';
     return;
   }
   const c = S.data.company;
-  $('sub').textContent = `${c.name} • ราคา ณ ${c.priceDate}`;
+  $('sub').textContent = `${c.name} • ราคา ณ ${c.priceDate}` + (S.backup ? ' (ข้อมูลสำรอง อาจไม่ใช่ราคาล่าสุด)' : '');
+  if (S.backup) toast('เชื่อมต่อชีตราคาไม่ได้ กำลังแสดงข้อมูลสำรอง', 4000);
   renderChips(); render();
   try {
     await liff.init({ liffId: CATALOG_LIFF_ID });
@@ -275,16 +292,27 @@ async function main() {
   } catch (e) { console.warn('LIFF init failed', e); }
 }
 
-async function loadEmployee() {
-  try {
-    const r = await api('profile');
-    S.employee = r.registered ? r.employee : null;
-  } catch (e) { S.employee = null; S.employeeErr = e.message; }
-  renderWho();
+function loadEmployee() {
+  if (S.empLoading) return S.empLoading;          // กำลังตรวจอยู่ ให้รอผลเดิม ไม่ยิงซ้ำ
+  S.empLoading = (async () => {
+    S.employeeErr = '';
+    try {
+      const r = await api('profile');
+      S.employee = r.registered ? r.employee : null;
+      if (!r.registered) S.employeeErr = 'บัญชี LINE นี้ยังไม่ได้ผูกกับรหัสพนักงาน กรุณาเปิดแอป "ลงเวลาเข้างาน" แล้วลงทะเบียนก่อน';
+    } catch (e) { S.employee = null; S.employeeErr = e.message; }
+    S.empLoading = null;
+    renderWho();
+  })();
+  return S.empLoading;
+}
+function lineIdTail() {
+  try { const d = liff.getDecodedIDToken(); return d && d.sub ? d.sub.slice(-6) : '-'; } catch (e) { return '-'; }
 }
 function renderWho() {
   if (S.employee) $('whoText').innerHTML = `พนักงานขาย: <b>${esc(S.employee.name)}</b> (รหัส ${esc(S.employee.code)})`;
-  else $('whoText').innerHTML = `<span class="err">${esc(S.employeeErr || 'บัญชี LINE นี้ยังไม่ได้ลงทะเบียน กรุณาลงทะเบียนในแอป "ลงเวลาเข้างาน" ก่อน')}</span>`;
+  else $('whoText').innerHTML = `<span class="err">${esc(S.employeeErr || 'กำลังตรวจสอบพนักงาน…')}</span>` +
+    `<br><span class="hint">รหัส LINE ลงท้าย: ${esc(lineIdTail())}</span>`;
 }
 
 /* ===== แคตตาล็อก ===== */
@@ -479,7 +507,9 @@ $('btnGps').onclick = () => {
 $('btnSubmit').onclick = async () => {
   if (S.busy) return;
   const err = m => { $('orderErr').textContent = m; return false; };
-  if (!S.employee) return err('บัญชีนี้ยังไม่ได้ลงทะเบียนพนักงาน จึงบันทึกคำสั่งซื้อไม่ได้');
+  if (!S.employee) { $('orderErr').textContent = 'กำลังตรวจสอบพนักงาน…'; await loadEmployee(); }
+  if (!S.employee) return err(`${S.employeeErr || 'ตรวจสอบพนักงานไม่สำเร็จ'} (รหัส LINE ลงท้าย ${lineIdTail()})`);
+  $('orderErr').textContent = '';
   const shop = $('shop').value.trim(), delivery = $('delivery').value.trim();
   if (!shop) return err('กรุณากรอกชื่อร้านค้าที่สั่งซื้อ');
   if (!delivery && !S.gps) return err('กรุณากรอกสถานที่จัดส่ง หรือกดใช้ตำแหน่งปัจจุบัน');
